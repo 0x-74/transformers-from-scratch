@@ -7,19 +7,18 @@ from data_utils import load_and_clean_dialogues, build_vocab, get_splits, get_ba
 # ==========================
 # HYPERPARAMETERS
 # ==========================
+torch.manual_seed(74)
 CHARACTER = 'anya'
 BLOCK_SIZE = 8
 BATCH_SIZE = 32
 TRAIN_SPLIT = 0.8
-LEARNING_RATE = 1e-2
-TRAIN_STEPS = 10_000
+LEARNING_RATE = 1e-3
+TRAIN_STEPS = 5_000
 EVAL_INTERVAL = 1_000
 EVAL_ITERS = 200
 SEED = 74
 N_EMBD = 32
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-# ==========================
-
 
 # ==========================
 # DATA PREP
@@ -34,19 +33,44 @@ train_data, val_data = get_splits(data, TRAIN_SPLIT)
 # ==========================
 # MODEL
 # ==========================
+class Head(nn.Module):
+    """a single head of self-attention"""
+    def __init__(self,head_size):
+        super().__init__()
+        self.key = nn.Linear(N_EMBD, head_size, bias=False)
+        self.query = nn.Linear(N_EMBD, head_size, bias=False)
+        self.value = nn.Linear(N_EMBD, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
+    
+    def forward(self,x):
+        B,T,C = x.shape
+        k = self.key(x)
+        q = self.query(x)
+        
+        wei = q @ k.transpose(-2,-1) * C **-0.5 # (B,T,C) x (B,C,T) = (B,T,T)
+        wei = wei.masked_fill(self.tril[:T,:T] == 0 , float('-inf'))
+        wei = F.softmax(wei,dim=-1)
+        
+        v = self.value(x)
+        out = wei @ v
+        return out
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(VOCAB_SIZE, N_EMBD)
         self.lm_head = nn.Linear(N_EMBD, VOCAB_SIZE)
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD)
+        self.sa_head = Head(N_EMBD)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
         pos_emb = self.position_embedding_table(torch.arange(T, device=DEVICE))
         x = tok_emb + pos_emb
+        x = self.sa_head(x)
         logits = self.lm_head(x)
+        
         loss = None
         if targets is not None:
             logits = rearrange(logits, "b t c -> (b t) c")
@@ -56,8 +80,10 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
-            logits, _ = self(idx)
-            logits = logits[:, -1, :]
+            
+            idx_cond = idx[:,-BLOCK_SIZE:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :]  # last time step
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
@@ -65,7 +91,7 @@ class BigramLanguageModel(nn.Module):
 
 
 # ==========================
-# EVALUATION
+# EVALUATION FUNCTION
 # ==========================
 @torch.no_grad()
 def estimate_loss(m):
@@ -106,4 +132,4 @@ print("Final loss:", loss.item())
 # SAMPLE GENERATION
 # ==========================
 start_token = torch.zeros((1, 1), device=DEVICE, dtype=torch.long)
-print(decode(m.generate(start_token, max_new_tokens=50)[0].tolist()))
+print(decode(m.generate(start_token, max_new_tokens=500)[0].tolist()))
