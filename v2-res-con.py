@@ -7,17 +7,17 @@ from data_utils import load_and_clean_dialogues, build_vocab, get_splits, get_ba
 # ==========================
 # HYPERPARAMETERS
 # ==========================
+torch.manual_seed(74)
 CHARACTER = 'anya'
-BLOCK_SIZE = 256
-BATCH_SIZE = 64
+BLOCK_SIZE = 8
+BATCH_SIZE = 32
 TRAIN_SPLIT = 0.8
-LEARNING_RATE = 3e-4
+LEARNING_RATE = 1e-3
 TRAIN_STEPS = 5_000
 EVAL_INTERVAL = 1_000
 EVAL_ITERS = 200
-DROPOUT = 0.2
 SEED = 74
-N_EMBD = 384
+N_EMBD = 32
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # ==========================
@@ -41,7 +41,6 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd,4 * n_embd),
             nn.ReLU(),
             nn.Linear(4* n_embd,n_embd),
-            nn.Dropout(DROPOUT)
     
         )
     def forward(self,x):
@@ -55,8 +54,6 @@ class Head(nn.Module):
         self.query = nn.Linear(N_EMBD, head_size, bias=False)
         self.value = nn.Linear(N_EMBD, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
-        
-        self.dropout = nn.Dropout(DROPOUT)
     
     def forward(self,x):
         B,T,C = x.shape
@@ -66,7 +63,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2,-1) * C **-0.5 # (B,T,C) x (B,C,T) = (B,T,T)
         wei = wei.masked_fill(self.tril[:T,:T] == 0 , float('-inf'))
         wei = F.softmax(wei,dim=-1)
-        wei = self.dropout(wei)
+        
         v = self.value(x)
         out = wei @ v
         return out
@@ -76,10 +73,10 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(N_EMBD,N_EMBD)
-        self.dropout = nn.Dropout(DROPOUT)
+        
     def forward(self,x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.dropout(self.proj(out))
+        out = self.proj(out)
         return out
     
 class Block(nn.Module):
@@ -88,12 +85,10 @@ class Block(nn.Module):
         head_size = n_embd//n_heads
         self.ma = MultiHeadAttention(n_heads,head_size)
         self.ffwd = FeedForward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
         
     def forward(self,x):
-        x = x + self.ma(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
+        x = x + self.ma(x)
+        x = x + self.ffwd(x)
         return x
     
 class BigramLanguageModel(nn.Module):
@@ -104,8 +99,7 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, N_EMBD)
         self.blocks = nn.Sequential(Block(N_EMBD,n_heads=4)
                                    ,Block(N_EMBD,n_heads=4)
-                                   ,Block(N_EMBD,n_heads=4)
-                                   ,nn.LayerNorm(N_EMBD))
+                                   ,Block(N_EMBD,n_heads=4))
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
@@ -153,29 +147,25 @@ def estimate_loss(m):
 # ==========================
 # TRAINING
 # ==========================
-if __name__ == "__main__":
-    torch.manual_seed(74)
-    m = BigramLanguageModel().to(DEVICE)
-    optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE)
+m = BigramLanguageModel().to(DEVICE)
+optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE)
 
-    for step in range(TRAIN_STEPS):
-        if step % EVAL_INTERVAL == 0:
-            losses = estimate_loss(m)
-            print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+for step in range(TRAIN_STEPS):
+    if step % EVAL_INTERVAL == 0:
+        losses = estimate_loss(m)
+        print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-        xb, yb = get_batch("train", train_data, val_data, BLOCK_SIZE, BATCH_SIZE, DEVICE)
-        _, loss = m(xb, yb)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+    xb, yb = get_batch("train", train_data, val_data, BLOCK_SIZE, BATCH_SIZE, DEVICE)
+    _, loss = m(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
 
-    print("Final loss:", loss.item())
+print("Final loss:", loss.item())
 
 
-    # ==========================
-    # SAMPLE GENERATION
-    # ==========================
-    start_token = torch.zeros((1, 1), device=DEVICE, dtype=torch.long)
-    print(decode(m.generate(start_token, max_new_tokens=500)[0].tolist()))
-
-    torch.save(m.state_dict(),'anya_gpt.pth')
+# ==========================
+# SAMPLE GENERATION
+# ==========================
+start_token = torch.zeros((1, 1), device=DEVICE, dtype=torch.long)
+print(decode(m.generate(start_token, max_new_tokens=500)[0].tolist()))
