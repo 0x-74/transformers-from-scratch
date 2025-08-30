@@ -14,6 +14,8 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
+from model_utils import train_loop
+from profiler_utils import log_generation  # our reusable training function
 
 # ---------------------------------------------------------------------------
 # Dataset Creation
@@ -25,9 +27,9 @@ def retrieve_character_dialogues(character: str, file: Path):
     with open(file, encoding="utf-8") as f:
         for line in f:
             search_line = line.lower()
-            anya_found = search_line.find(character)
+            char_found = search_line.find(character)
             comma_found = search_line.find(",,")
-            if anya_found != -1 and comma_found != -1 and anya_found < comma_found:
+            if char_found != -1 and comma_found != -1 and char_found < comma_found:
                 dialogues.append(line[comma_found + 2 :])
     return dialogues
 
@@ -57,8 +59,8 @@ print(f"Memory size: {size_kb} KB")
 print(f"Number of dialogues: {len(cleaned_dialogues)}")
 
 chars = sorted(set(cleaned_dialogues))
-vocab_size = len(chars)
-print(f"Vocabulary size: {vocab_size}")
+VOCAB_SIZE = len(chars)
+print(f"Vocabulary size: {VOCAB_SIZE}")
 print(f"Possible Vocabulary = [{''.join(chars)}]")
 
 
@@ -91,30 +93,7 @@ val_data = data[n:]
 
 
 # ---------------------------------------------------------------------------
-# Batch Loader
-# ---------------------------------------------------------------------------
-
-torch.manual_seed(74)
-batch_size = 4
-block_size = 8
-
-def get_batch(split: str):
-    """Return a batch of data (x, y) for training/validation."""
-    dataset = train_data if split == "train" else val_data
-    ix = torch.randint(len(dataset) - block_size, (batch_size,))
-    x = torch.stack([dataset[i : i + block_size] for i in ix])
-    y = torch.stack([dataset[i + 1 : i + block_size + 1] for i in ix])
-    return x, y
-
-
-# Visualize batch
-xb, yb = get_batch("train")
-print("Inputs (xb):", xb.shape)
-print("Targets (yb):", yb.shape)
-
-
-# ---------------------------------------------------------------------------
-# Bigram Language Model
+# Model Definition
 # ---------------------------------------------------------------------------
 
 class BigramLanguageModel(nn.Module):
@@ -148,26 +127,38 @@ class BigramLanguageModel(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Training
+# Training Orchestration
 # ---------------------------------------------------------------------------
 
-m = BigramLanguageModel(vocab_size)
-optimizer = torch.optim.AdamW(m.parameters(), lr=1e-2)
+if __name__ == "__main__":
+    # Hyperparameters
+    from config import *
 
-batch_size = 32
-for step in range(10_000):
-    xb, yb = get_batch("train")
-    logits, loss = m(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+    torch.manual_seed(SEED)
 
-print("Final loss:", loss.item())
+    model = BigramLanguageModel(VOCAB_SIZE).to(DEVICE)
 
+    # Train model with reusable train_loop
+    model, final_loss = train_loop(
+        model=model,
+        device=DEVICE,
+        lr=LEARNING_RATE,
+        steps=TRAIN_STEPS,
+        eval_interval=EVAL_INTERVAL,
+        eval_iters=EVAL_ITERS,
+        train_data=train_data,
+        val_data=val_data,
+        block_size=BLOCK_SIZE,
+        batch_size=BATCH_SIZE,
+        seed=SEED,
+    )
 
-# ---------------------------------------------------------------------------
-# Text Generation
-# ---------------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Text Generation
+    # -----------------------------------------------------------------------
+    start_token = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
+    sample = log_generation(model, decode, start_token, max_new_tokens=500)
+    print(sample)
 
-output = m.generate(idx=torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)
-print(decode(output[0].tolist()))
+    # Save model
+    torch.save(model.state_dict(), "bigram.pth")

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -7,18 +8,9 @@ from data_utils import load_and_clean_dialogues, build_vocab, get_splits, get_ba
 # ==========================
 # HYPERPARAMETERS
 # ==========================
-torch.manual_seed(74)
-CHARACTER = 'anya'
-BLOCK_SIZE = 8
-BATCH_SIZE = 32
-TRAIN_SPLIT = 0.8
-LEARNING_RATE = 1e-3
-TRAIN_STEPS = 5_000
-EVAL_INTERVAL = 1_000
-EVAL_ITERS = 200
-SEED = 74
-N_EMBD = 32
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+from config import *
+from model_utils import train_loop
+from profiler_utils import log_generation
 
 # ==========================
 # DATA PREP
@@ -111,25 +103,39 @@ def estimate_loss(m):
 # ==========================
 # TRAINING
 # ==========================
-m = BigramLanguageModel().to(DEVICE)
-optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE)
+# ---------------------------------------------------------------------------
+# Training Orchestration
+# ---------------------------------------------------------------------------
 
-for step in range(TRAIN_STEPS):
-    if step % EVAL_INTERVAL == 0:
-        losses = estimate_loss(m)
-        print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+if __name__ == "__main__":
+    # Hyperparameters
+    from config import *
 
-    xb, yb = get_batch("train", train_data, val_data, BLOCK_SIZE, BATCH_SIZE, DEVICE)
-    _, loss = m(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+    torch.manual_seed(SEED)
 
-print("Final loss:", loss.item())
+    model = BigramLanguageModel().to(DEVICE)
 
+    # Train model with reusable train_loop
+    model, final_loss = train_loop(
+        model=model,
+        device=DEVICE,
+        lr=LEARNING_RATE,
+        steps=TRAIN_STEPS,
+        eval_interval=EVAL_INTERVAL,
+        eval_iters=EVAL_ITERS,
+        train_data=train_data,
+        val_data=val_data,
+        block_size=BLOCK_SIZE,
+        batch_size=BATCH_SIZE,
+        seed=SEED,
+    )
 
-# ==========================
-# SAMPLE GENERATION
-# ==========================
-start_token = torch.zeros((1, 1), device=DEVICE, dtype=torch.long)
-print(decode(m.generate(start_token, max_new_tokens=500)[0].tolist()))
+    # -----------------------------------------------------------------------
+    # Text Generation
+    # -----------------------------------------------------------------------
+    start_token = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
+    sample = log_generation(model, decode, start_token, max_new_tokens=500)
+    print(sample)
+
+    # Save model
+    torch.save(model.state_dict(), f"{os.path.splitext(os.path.basename(__file__))[0]}.pth")

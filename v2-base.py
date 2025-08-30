@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -7,17 +8,9 @@ from data_utils import load_and_clean_dialogues, build_vocab, get_splits, get_ba
 # ==========================
 # HYPERPARAMETERS
 # ==========================
-CHARACTER = 'anya'
-BLOCK_SIZE = 8
-BATCH_SIZE = 32
-TRAIN_SPLIT = 0.8
-LEARNING_RATE = 1e-2
-TRAIN_STEPS = 10_000
-EVAL_INTERVAL = 1_000
-EVAL_ITERS = 200
-SEED = 74
-N_EMBD = 32
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+from config import *
+from model_utils import train_loop
+from profiler_utils import log_generation
 # ==========================
 
 
@@ -44,7 +37,10 @@ class BigramLanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=DEVICE))
+        # ensure positions live on same device as idx
+        pos_emb = self.position_embedding_table(
+            torch.arange(T, device=idx.device)
+        )
         x = tok_emb + pos_emb
         logits = self.lm_head(x)
         loss = None
@@ -56,8 +52,9 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
-            logits, _ = self(idx)
-            logits = logits[:, -1, :]
+            idx_cond = idx[:, -BLOCK_SIZE:]  # crop context window
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :]  # last timestep
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
@@ -65,45 +62,41 @@ class BigramLanguageModel(nn.Module):
 
 
 # ==========================
-# EVALUATION
-# ==========================
-@torch.no_grad()
-def estimate_loss(m):
-    out = {}
-    m.eval()
-    for split in ["train", "val"]:
-        losses = torch.zeros(EVAL_ITERS)
-        for k in range(EVAL_ITERS):
-            X, Y = get_batch(split, train_data, val_data, BLOCK_SIZE, BATCH_SIZE, DEVICE)
-            _, loss = m(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean().item()
-    m.train()
-    return out
-
-
-# ==========================
 # TRAINING
 # ==========================
-m = BigramLanguageModel().to(DEVICE)
-optimizer = torch.optim.AdamW(m.parameters(), lr=LEARNING_RATE)
+# ---------------------------------------------------------------------------
+# Training Orchestration
+# ---------------------------------------------------------------------------
 
-for step in range(TRAIN_STEPS):
-    if step % EVAL_INTERVAL == 0:
-        losses = estimate_loss(m)
-        print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+if __name__ == "__main__":
+    # Hyperparameters
+    from config import *
 
-    xb, yb = get_batch("train", train_data, val_data, BLOCK_SIZE, BATCH_SIZE, DEVICE)
-    _, loss = m(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+    torch.manual_seed(SEED)
 
-print("Final loss:", loss.item())
+    model = BigramLanguageModel().to(DEVICE)
 
+    # Train model with reusable train_loop
+    model, final_loss = train_loop(
+        model=model,
+        device=DEVICE,
+        lr=LEARNING_RATE,
+        steps=TRAIN_STEPS,
+        eval_interval=EVAL_INTERVAL,
+        eval_iters=EVAL_ITERS,
+        train_data=train_data,
+        val_data=val_data,
+        block_size=BLOCK_SIZE,
+        batch_size=BATCH_SIZE,
+        seed=SEED,
+    )
 
-# ==========================
-# SAMPLE GENERATION
-# ==========================
-start_token = torch.zeros((1, 1), device=DEVICE, dtype=torch.long)
-print(decode(m.generate(start_token, max_new_tokens=50)[0].tolist()))
+    # -----------------------------------------------------------------------
+    # Text Generation
+    # -----------------------------------------------------------------------
+    start_token = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
+    sample = log_generation(model, decode, start_token, max_new_tokens=500)
+    print(sample)
+
+    # Save model
+    torch.save(model.state_dict(), f"{os.path.splitext(os.path.basename(__file__))[0]}.pth")
